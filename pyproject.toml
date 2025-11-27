@@ -1,0 +1,23 @@
+[project]
+name = "tropical-cv"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.41.5",
+    "cartopy>=0.25.0",
+    "h5netcdf>=1.7.3",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.7",
+    "netcdf4>=1.7.3",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "pillow>=12.0.0",
+    "s3fs>=0.4.2",
+    "satpy>=0.59.0",
+    "scikit-learn>=1.7.2",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "xarray>=2025.11.0",
+]
