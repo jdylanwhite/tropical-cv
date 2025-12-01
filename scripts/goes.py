@@ -50,7 +50,7 @@ def get_satellite_for_date(position, date):
     else:
         raise ValueError(f"Position must be 'goes-east' or 'goes-west', got: {position}")
 
-def get_goes_file(position='goes-east', date=None, hour=18, band=2, product='ABI-L1b-RadF'):
+def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='ABI-L1b-RadF'):
     """
     Get a GOES file from AWS S3 (public bucket, no credentials needed)
     
@@ -99,6 +99,8 @@ def get_goes_file(position='goes-east', date=None, hour=18, band=2, product='ABI
     # Build the S3 path
     year = date.year
     day = day_of_year(date)
+    if hour is None:
+        hour = date.hour
     
     prefix = f'{product}/{year}/{day:03.0f}/{hour:02.0f}/'
     pattern = f'OR_{product}-{scan_mode}C{band:02.0f}'
