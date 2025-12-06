@@ -17,8 +17,11 @@ def day_of_year(date) -> datetime.datetime:
     Returns:
         (datetime): the day of the year for the provided datetime
     '''
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=datetime.timezone.utc)
+
     year = date.year
-    firstDay = datetime.datetime(year, 1, 1)
+    firstDay = datetime.datetime(year, 1, 1, tzinfo=datetime.timezone.utc)
     return (date - firstDay).days + 1
 
 def get_satellite_for_date(position, date):
@@ -32,17 +35,20 @@ def get_satellite_for_date(position, date):
     Returns:
         str: satellite name (e.g., 'goes16', 'goes19')
     """
-    
+   
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=datetime.timezone.utc)
+
     if position == 'goes-east':
         # GOES-East transitions
-        if date >= datetime.datetime(2025, 4, 7):
+        if date >= datetime.datetime(2025, 4, 7, tzinfo=datetime.timezone.utc):
             return 'goes19'
         else:
             return 'goes16'
     
     elif position == 'goes-west':
         # GOES-West transitions
-        if date >= datetime.datetime(2023, 1, 10):
+        if date >= datetime.datetime(2023, 1, 10, tzinfo=datetime.timezone.utc):
             return 'goes18'
         else:
             return 'goes17'
@@ -50,7 +56,7 @@ def get_satellite_for_date(position, date):
     else:
         raise ValueError(f"Position must be 'goes-east' or 'goes-west', got: {position}")
 
-def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='ABI-L1b-RadF'):
+def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='ABI-L1b-RadF',verbose=False):
     """
     Get a GOES file from AWS S3 (public bucket, no credentials needed)
     
@@ -72,7 +78,7 @@ def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='A
     # If position is 'goes-east' or 'goes-west', determine the satellite
     if position in ['goes-east', 'goes-west']:
         satellite = get_satellite_for_date(position, date)
-        print(f"Using {satellite} for {position} on {date.strftime('%Y-%m-%d')}")
+        if verbose: print(f"Using {satellite} for {position} on {date.strftime('%Y-%m-%d')}")
     else:
         # Assume it's a specific satellite name
         satellite = position
@@ -91,7 +97,9 @@ def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='A
     bucket = bucket_map[satellite]
     
     # Determine scan mode based on date
-    if date < datetime.datetime(2019, 4, 2, 16):
+    if date.tzinfo is None:   
+        date = date.replace(tzinfo=datetime.timezone.utc)
+    if date < datetime.datetime(2019, 4, 2, 16, tzinfo=datetime.timezone.utc):
         scan_mode = "M3"
     else:
         scan_mode = "M6"
@@ -110,33 +118,28 @@ def get_goes_file(position='goes-east', date=None, hour=None, band=2, product='A
     
     # List files matching the pattern
     s3_path = f'{bucket}/{prefix}'
-    try:
-        files = fs.ls(s3_path)
-        # Filter for the specific band and pattern
-        matching_files = [f for f in files if pattern in f]
+    files = fs.ls(s3_path)
+    
+    # Filter for the specific band and pattern
+    matching_files = [f for f in files if pattern in f]
+    
+    if not matching_files:
+        if verbose: print(f"Checked path: {s3_path}")
+        raise FileNotFoundError(f"No files found matching pattern: {pattern}")
+    
+    # Get the first file
+    file_path = matching_files[0]
+    if verbose: print(f"Found file: {file_path.split('/')[-1]}")
+    
+    # Open with xarray
+    with fs.open(file_path, 'rb') as f:
+        ds = xr.open_dataset(f, engine='h5netcdf')
+        # Load into memory to avoid issues when file handle closes
+        ds = ds.load()
         
-        if not matching_files:
-            print(f"No files found matching pattern: {pattern}")
-            print(f"Checked path: {s3_path}")
-            return None
-        
-        # Get the first file
-        file_path = matching_files[0]
-        print(f"Found file: {file_path.split('/')[-1]}")
-        
-        # Open with xarray
-        with fs.open(file_path, 'rb') as f:
-            ds = xr.open_dataset(f, engine='h5netcdf')
-            # Load into memory to avoid issues when file handle closes
-            ds = ds.load()
-            
-        return ds
-        
-    except Exception as e:
-        print(f"Error accessing S3: {e}")
-        return None
+    return ds
 
-def extract_tile_around_latlon(ds, lat, lon, tile_size=512):
+def extract_tile_around_latlon(ds, lat, lon, tile_size=512, verbose=False):
     """Extract a tile of specified size centered on a lat/lon coordinate.
 
     Args:
@@ -186,8 +189,9 @@ def extract_tile_around_latlon(ds, lat, lon, tile_size=512):
     x_meters, y_meters = p(lon, lat)
     
     # Debug prints
-    print(f"Input: lat={lat}, lon={lon}")
-    print(f"Projected: x_meters={x_meters}, y_meters={y_meters}")
+    if verbose:
+        print(f"Input: lat={lat}, lon={lon}")
+        print(f"Projected: x_meters={x_meters}, y_meters={y_meters}")
     
     # Check if projection was successful (returns inf if point not visible)
     if np.isinf(x_meters) or np.isinf(y_meters) or np.isnan(x_meters) or np.isnan(y_meters):
@@ -196,16 +200,17 @@ def extract_tile_around_latlon(ds, lat, lon, tile_size=512):
     # Convert meters back to radians
     x_center = x_meters / sat_height
     y_center = y_meters / sat_height
-    
-    print(f"Radians: x_center={x_center}, y_center={y_center}")
-    print(f"x_rad range: [{x_rad.min()}, {x_rad.max()}]")
-    print(f"y_rad range: [{y_rad.min()}, {y_rad.max()}]")
+   
+    if verbose:
+        print(f"Radians: x_center={x_center}, y_center={y_center}")
+        print(f"x_rad range: [{x_rad.min()}, {x_rad.max()}]")
+        print(f"y_rad range: [{y_rad.min()}, {y_rad.max()}]")
     
     # Find the closest pixel indices
     x_idx = int(np.argmin(np.abs(x_rad - x_center)))
     y_idx = int(np.argmin(np.abs(y_rad - y_center)))
     
-    print(f"Center pixel: x_idx={x_idx}, y_idx={y_idx}")
+    if verbose: print(f"Center pixel: x_idx={x_idx}, y_idx={y_idx}")
     
     # Calculate tile boundaries
     half_tile = tile_size // 2
@@ -226,7 +231,7 @@ def extract_tile_around_latlon(ds, lat, lon, tile_size=512):
         padded_tile = np.zeros((tile_size, tile_size))
         padded_tile[:actual_height, :actual_width] = tile
         tile = padded_tile
-        print(f"Warning: Tile padded. Original size: {actual_height}x{actual_width}")
+        if verbose: print(f"Warning: Tile padded. Original size: {actual_height}x{actual_width}")
     
     # Store tile information
     tile_info = {

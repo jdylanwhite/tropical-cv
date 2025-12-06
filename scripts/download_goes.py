@@ -6,14 +6,12 @@
 import datetime
 import numpy as np
 from pyproj import Proj
-from PIL import Image
-import time
 import os
-from pathlib import Path
-import xarray as xr
 import pandas as pd
 from tqdm import tqdm
 import argparse
+import json
+from pathlib import Path
 
 # Import functions I've written
 import goes
@@ -21,14 +19,31 @@ import ibtracs
 
 
 def download_data(
-        ibtracs_path,
-        training_data_dir,
-        band=13,
-        start_date=None,
-        end_date=None,
-        sample_size=1200,
-        limit=None
+    ibtracs_path,
+    training_data_dir,
+    band=13,
+    start_date=None,
+    end_date=None,
+    sample_size=1200,
+    limit=None
 ):
+
+    # Set up a dictionary for tracking downloaded tiles
+    # We may have already ran this script, 
+    # so check if it exists before starting from scratch
+    output_path = os.path.join(args.training_data_dir,'image_data.json')
+    if os.path.exists(output_path):
+        with open(output_path,'r') as f:
+            image_data = json.load(f)
+        if len(image_data['images'])==0:
+            image_id = 0
+        else:
+            image_id = max([int(x['id']) for x in image_data['images']])+1
+    else:
+        image_data = {
+            'images': [],
+        }
+        image_id = 0
 
     # Read the IBTrACS data that we've already filtered 
     # for intersection on the GOES disk 
@@ -47,7 +62,7 @@ def download_data(
 
     # Limit the data to a random sample, if applicable
     if limit is not None and len(df)>limit:
-    	df = df.sample(limit)
+        df = df.sample(limit)
     
     # Set the buffer (in pixels) size
     buffer_size = sample_size // 2
@@ -55,10 +70,17 @@ def download_data(
     # Loop through all of the dates in the IBTrACS dataframe
     dates = df['ISO_TIME'].unique()
     for date in tqdm(dates,total=len(dates),desc="Downloading GOES Imagery"):
-    
+
         # Convert the numpy.datetime64 object into a datetime object
         dt = datetime.datetime.fromisoformat(str(date)[:-3])
-            
+
+        # Check if we've already downloaded this data
+        prefix = dt.strftime("%Y%m%d_%HZ")
+        check_file_list = list(Path(training_data_dir).joinpath('positive').glob(f'{prefix}*'))
+        if len(check_file_list) > 0:
+            print(f'You have already downloaded data from this disk, skipping {prefix}')
+            continue
+
         try:
         
             # Get the GOES data
@@ -103,8 +125,25 @@ def download_data(
                 file_path = os.path.join(training_data_dir,'positive',file_name)
          
                 # Save as netCDF
-                data = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
-                data.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
+                rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
+                rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
+
+                # Append to COCO-style data dictionary
+                image_data['images'].append({
+                    'category':'positive',
+                    'file_name':file_path,
+                    'id':image_id,
+
+                    'width':int(rad_tile.shape[1]),
+                    'height':int(rad_tile.shape[0]),
+                    'band':int(band),
+                    'original_file':str(ds.dataset_name),
+                    'original_ul':[int(y_ind-buffer_size),int(x_ind-buffer_size)],
+                    'track_coordinates':[float(track_lon),float(track_lat)],
+                    'date':str(date),
+                    'df_index':i
+                })
+                image_id += 1
          
                 # Mark these pixels as containing a positive sample
                 free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
@@ -127,9 +166,23 @@ def download_data(
                     file_path = os.path.join(training_data_dir,'negative',file_name)
          
                     # Save as netCDF
-                    data = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
-                    data.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
-         
+                    rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
+                    rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
+
+                    # Append to COCO-style data dictionary
+                    image_data['images'].append({
+                        'category':'negative',
+                        'file_name':file_path,
+                        'id':image_id,
+                        'width':int(rad_tile.shape[1]),
+                        'height':int(rad_tile.shape[0]),
+                        'band':int(band),
+                        'original_file':str(ds.dataset_name),
+                        'original_ul':[int(y_ind-buffer_size),int(x_ind-buffer_size)],
+                        'date':str(date),
+                    })
+                    image_id += 1
+
                     # Also mark these pixels, since we have a sample already taken from them
                     free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
          
@@ -147,6 +200,11 @@ def download_data(
     
         except Exception as e:
            print(f'Error processing training data from {dt}: {e}')
+
+    with open(output_path,'w') as f:
+        json.dump(image_data,f)
+
+    return image_data
            
 if __name__ == '__main__':
     
@@ -188,7 +246,7 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
     
-    download_data(
+    image_data = download_data(
         args.ibtracs_path,
         args.training_data_dir,
         band=args.band,
@@ -197,5 +255,3 @@ if __name__ == '__main__':
         sample_size=args.sample_size,
         limit=args.limit
     )
-
-

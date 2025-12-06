@@ -14,10 +14,12 @@ dependencies = [
     "numpy>=2.3.5",
     "pandas>=2.3.3",
     "pillow>=12.0.0",
+    "python-lsp-server[all]>=1.13.2",
     "s3fs>=0.4.2",
     "satpy>=0.59.0",
     "scikit-learn>=1.7.2",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
+    "tqdm>=4.67.1",
     "xarray>=2025.11.0",
 ]
