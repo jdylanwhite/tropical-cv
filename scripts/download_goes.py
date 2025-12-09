@@ -17,6 +17,47 @@ from pathlib import Path
 import goes
 import ibtracs
 
+def get_dataset_slice(ds_var,x_ind,y_ind,buffer_size):
+
+    # Calculate the slice bounds
+    y_start = max(0, y_ind - buffer_size)
+    y_end = min(ds_var.shape[0], y_ind + buffer_size)
+    x_start = max(0, x_ind - buffer_size)
+    x_end = min(ds_var.shape[1], x_ind + buffer_size)
+
+    # Extract the available data
+    data_slice = ds_var[y_start:y_end, x_start:x_end]
+
+    # Calculate padding needed on each side
+    pad_top = max(0, buffer_size - y_ind)
+    pad_bottom = max(0, (y_ind + buffer_size) - ds_var.shape[0])
+    pad_left = max(0, buffer_size - x_ind)
+    pad_right = max(0, (x_ind + buffer_size) - ds_var.shape[1])
+
+    padded_data = data_slice.pad(
+        y=(pad_top, pad_bottom),
+        x=(pad_left, pad_right),
+        mode='constant',
+        constant_values=np.nan
+    )
+
+    if 0 in padded_data.shape:
+        raise IndexError('0 in data slice shape!')
+
+    return padded_data
+
+def remove_free_pixels(free,x_ind,y_ind,buffer_size):
+    
+    # Calculate the slice bounds
+    y_start = max(0, y_ind - buffer_size)
+    y_end = min(free.shape[0], y_ind + buffer_size)
+    x_start = max(0, x_ind - buffer_size)
+    x_end = min(free.shape[1], x_ind + buffer_size)
+
+    # Extract the available data
+    free[y_start:y_end, x_start:x_end] = 0
+
+    return free
 
 def download_data(
     ibtracs_path,
@@ -54,11 +95,11 @@ def download_data(
     if start_date is not None:
         start_date = datetime.datetime.fromisoformat(start_date)
         df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'],utc=True)
-        df = df.loc[(df['ISO_TIME'] > start_date)].copy(deep=True)
+        df = df.loc[(df['ISO_TIME'] >= start_date)].copy(deep=True)
     if end_date is not None:
         end_date = datetime.datetime.fromisoformat(end_date)
         df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'],utc=True)
-        df = df.loc[(df['ISO_TIME'] < end_date)].copy(deep=True)
+        df = df.loc[(df['ISO_TIME'] <= end_date)].copy(deep=True)
 
     # Limit the data to a random sample, if applicable
     if limit is not None and len(df)>limit:
@@ -125,7 +166,8 @@ def download_data(
                 file_path = os.path.join(training_data_dir,'positive',file_name)
          
                 # Save as netCDF
-                rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
+                rad_tile = get_dataset_slice(ds.Rad,x_ind,y_ind,buffer_size)
+                #rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
                 rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
 
                 # Append to COCO-style data dictionary
@@ -133,7 +175,6 @@ def download_data(
                     'category':'positive',
                     'file_name':file_path,
                     'id':image_id,
-
                     'width':int(rad_tile.shape[1]),
                     'height':int(rad_tile.shape[0]),
                     'band':int(band),
@@ -146,7 +187,7 @@ def download_data(
                 image_id += 1
          
                 # Mark these pixels as containing a positive sample
-                free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
+                free = remove_free_pixels(free,x_ind,y_ind,buffer_size)
          
             # Now go find some random negative samples that don't overlap with locations where free == 0
             negative_count = 0
@@ -166,7 +207,8 @@ def download_data(
                     file_path = os.path.join(training_data_dir,'negative',file_name)
          
                     # Save as netCDF
-                    rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
+                    rad_tile = get_dataset_slice(ds.Rad,x_ind,y_ind,buffer_size)
+                    #rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
                     rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
 
                     # Append to COCO-style data dictionary
@@ -179,13 +221,16 @@ def download_data(
                         'band':int(band),
                         'original_file':str(ds.dataset_name),
                         'original_ul':[int(y_ind-buffer_size),int(x_ind-buffer_size)],
+                        'track_coordinates':[-9999,-9999],
                         'date':str(date),
+                        'df_index':-9999
                     })
                     image_id += 1
 
                     # Also mark these pixels, since we have a sample already taken from them
-                    free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
-         
+                    #free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
+                    free = remove_free_pixels(free,x_ind,y_ind,buffer_size)
+
                     # Advance the count of negative training sample images obtained
                     negative_count = negative_count + 1
          
@@ -201,8 +246,9 @@ def download_data(
         except Exception as e:
            print(f'Error processing training data from {dt}: {e}')
 
-    with open(output_path,'w') as f:
-        json.dump(image_data,f)
+        # Write output file on each iteration in case something fails
+        with open(output_path,'w') as f:
+            json.dump(image_data,f)
 
     return image_data
            
