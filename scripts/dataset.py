@@ -62,19 +62,20 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
 class GOESDataset(Dataset):
     """PyTorch Dataset for GOES satellite NetCDF imagery."""
     
-    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5):
+    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5, three_channel=False):
         """
         Args:
             image_metadata_path (str): JSON image metadata file pointing to image paths 
             patch_size (int): Size of random crop (default 512x512)
             augment (True): Whether to apply augmentations
             center_bias (float): Controls crop location bias toward center (0.0=uniform, 1.0=center only)
-            shuffle (bool): Whether to shuffle the image metadata for random loading
+            three_channel (bool): Convert grayscale imagery to 3 channel RGB
         """
         self.image_metadata_path = image_metadata_path
         self.patch_size = patch_size
         self.augment = augment
         self.center_bias = center_bias
+        self.three_channel = three_channel
 
         # Load the image metadata
         self.image_metadata = self._load_image_metadata()
@@ -225,6 +226,10 @@ class GOESDataset(Dataset):
         # patch = (patch - patch.mean()) / (patch.std() + 1e-8)
         patch = patch / patch.max()
         patch = torch.clamp(patch, 0, 1)
+
+        # Repeat to three channel RGB
+        if patch.shape[0] == 1:
+            patch = patch.repeat(3, 1, 1)
         
         return {'patch':patch,'category':category,'metadata':image_info}
     

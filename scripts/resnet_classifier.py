@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 from torchvision import models
 import numpy as np
 from tqdm import tqdm
@@ -13,37 +14,51 @@ from dataset import GOESDataset
 class CycloneClassifier(nn.Module):
     """Lightweight ResNet-18 classifier for tropical cyclone detection."""
     
-    def __init__(self, num_classes=2, pretrained=False):
+    def __init__(self, num_classes=2, pretrained=True, use_single_channel=False):
         """
         Args:
             num_classes (int): Number of output classes (2 for binary: cyclone/no-cyclone)
             pretrained (bool): Whether to use pretrained ImageNet weights
+            use_single_channel (bool): If True, modify conv1 for 1-channel input (no pretrained weights)
+                                       If False, expect 3-channel RGB input (can use pretrained weights)
         """
         super(CycloneClassifier, self).__init__()
+        
+        self.use_single_channel = use_single_channel
         
         # Load ResNet-18 (lightweight option)
         self.resnet = models.resnet18(pretrained=pretrained)
         
-        # Modify first conv layer to accept 1-channel input (grayscale satellite imagery)
-        self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        if use_single_channel:
+            # Modify first conv layer to accept 1-channel input (grayscale satellite imagery)
+            # Note: This discards pretrained weights for the first layer
+            self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # Otherwise, keep 3-channel input to use pretrained weights
         
         # Replace final fully connected layer
         num_features = self.resnet.fc.in_features
         self.resnet.fc = nn.Linear(num_features, num_classes)
     
     def forward(self, x):
+        # If single channel, input shape is [B, 1, H, W]
+        # If RGB, input shape is [B, 3, H, W]
         return self.resnet(x)
 
 
 class CycloneTrainer:
     """Training pipeline for cyclone classifier."""
     
-    def __init__(self, model, train_loader, val_loader, device, learning_rate=1e-3, log_file='training_log.csv'):
+    def __init__(self, model, train_loader, val_loader, device, learning_rate=1e-3, log_file='training_log.csv', tensorboard_dir='runs'):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
         self.log_file = log_file
+        
+        # TensorBoard writer
+        self.writer = SummaryWriter(tensorboard_dir)
+        print(f"TensorBoard logging to: {tensorboard_dir}")
+        print(f"Start TensorBoard with: tensorboard --logdir={tensorboard_dir}")
         
         # Label mapping
         self.label_map = {'negative': 0, 'positive': 1}
@@ -61,6 +76,7 @@ class CycloneTrainer:
         self.train_accs = []
         self.val_accs = []
         self.best_val_loss = float('inf')
+        self.global_step = 0
         
         # Initialize log file
         with open(self.log_file, 'w') as f:
@@ -74,7 +90,7 @@ class CycloneTrainer:
         total = 0
         
         pbar = tqdm(self.train_loader, desc='Training')
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             images = batch['patch'].to(self.device)
             # Convert string labels to integers
             labels = torch.tensor([self.label_map[cat] for cat in batch['category']]).to(self.device)
@@ -93,6 +109,11 @@ class CycloneTrainer:
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
+            
+            # Log to TensorBoard (every batch)
+            self.writer.add_scalar('Loss/train_batch', loss.item(), self.global_step)
+            self.writer.add_scalar('Accuracy/train_batch', 100. * predicted.eq(labels).sum().item() / labels.size(0), self.global_step)
+            self.global_step += 1
             
             # Update progress bar
             pbar.set_postfix({
@@ -162,6 +183,13 @@ class CycloneTrainer:
             self.scheduler.step(val_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
             
+            # Log epoch metrics to TensorBoard
+            self.writer.add_scalar('Loss/train_epoch', train_loss, epoch)
+            self.writer.add_scalar('Loss/val_epoch', val_loss, epoch)
+            self.writer.add_scalar('Accuracy/train_epoch', train_acc, epoch)
+            self.writer.add_scalar('Accuracy/val_epoch', val_acc, epoch)
+            self.writer.add_scalar('Learning_Rate', current_lr, epoch)
+            
             # Log to CSV file
             with open(self.log_file, 'a') as f:
                 f.write(f'{epoch+1},{train_loss:.6f},{train_acc:.4f},{val_loss:.6f},{val_acc:.4f},{current_lr:.8f}\n')
@@ -182,6 +210,9 @@ class CycloneTrainer:
                     'val_acc': val_acc,
                 }, save_path)
                 print(f"✓ Saved best model (val_loss: {val_loss:.4f})")
+        
+        # Close TensorBoard writer
+        self.writer.close()
         
         print("\n" + "="*50)
         print("Training complete!")
@@ -253,7 +284,7 @@ if __name__ == "__main__":
     # from your_dataset_module import GOESDataset
     
     # Configuration
-    METADATA_PATH = '/Users/dylanwhite/Documents/Projects/tropical-cv/data/training/image_data.json' # Single metadata file
+    METADATA_PATH = '/Users/dylanwhite/Documents/Projects/tropical-cv/data/training/image_data.json'
     VAL_SPLIT = 0.2  # 20% for validation
     SEED = 42  # For reproducibility
     BATCH_SIZE = 16  # Adjust based on your Mac's memory
@@ -271,7 +302,8 @@ if __name__ == "__main__":
         image_metadata_path=METADATA_PATH,
         patch_size=PATCH_SIZE,
         augment=True,
-        center_bias=0.5
+        center_bias=0.6,
+        three_channel=True
     )
     
     # Split into train and validation
@@ -292,7 +324,7 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
-        pin_memory=(device.type != "cpu")
+        pin_memory=False
     )
     
     val_loader = DataLoader(
@@ -300,11 +332,15 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
-        pin_memory=(device.type != "cpu")
+        pin_memory=False
     )
     
     # Create model
-    model = CycloneClassifier(num_classes=2, pretrained=False)
+    # Option 1: RGB with pretrained weights (RECOMMENDED for limited data)
+    model = CycloneClassifier(num_classes=2, pretrained=True, use_single_channel=False)
+    
+    # Option 2: Single channel, no pretrained weights
+    # model = CycloneClassifier(num_classes=2, pretrained=False, use_single_channel=True)
     
     # Create trainer
     trainer = CycloneTrainer(
@@ -318,10 +354,6 @@ if __name__ == "__main__":
     
     # Train
     history = trainer.train(num_epochs=NUM_EPOCHS, save_path='cyclone_classifier.pth')
-    
-    # Save training history
-    with open('training_history.json', 'w') as f:
-        json.dump(history, f, indent=2)
     
     print("\nTraining history saved to 'training_history.json'")
     print("Training log saved to 'training_log.csv'")
