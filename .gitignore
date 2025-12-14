@@ -2,12 +2,16 @@
 **/data
 **/images
 **/models
+**/weights
+**/runs
+**/archive
 
 # VS Code
 .vscode/
 
 # Jupyer
 **/.ipynb_checkpoints
+**/.virtual_documents
 
 # Python-generated files
 __pycache__/

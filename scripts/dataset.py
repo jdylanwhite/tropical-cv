@@ -228,8 +228,9 @@ class GOESDataset(Dataset):
         patch = torch.clamp(patch, 0, 1)
 
         # Repeat to three channel RGB
-        if patch.shape[0] == 1:
-            patch = patch.repeat(3, 1, 1)
+        if self.three_channel:
+            if patch.shape[0] == 1:
+                patch = patch.repeat(3, 1, 1)
         
         return {'patch':patch,'category':category,'metadata':image_info}
     

@@ -6,30 +6,27 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import models
 import numpy as np
 from tqdm import tqdm
-import json
 import random
-
-from dataset import GOESDataset
 
 class CycloneClassifier(nn.Module):
     """Lightweight ResNet-18 classifier for tropical cyclone detection."""
     
-    def __init__(self, num_classes=2, pretrained=True, use_single_channel=False):
+    def __init__(self, num_classes=2, pretrained=True, use_three_channel=False):
         """
         Args:
             num_classes (int): Number of output classes (2 for binary: cyclone/no-cyclone)
             pretrained (bool): Whether to use pretrained ImageNet weights
-            use_single_channel (bool): If True, modify conv1 for 1-channel input (no pretrained weights)
-                                       If False, expect 3-channel RGB input (can use pretrained weights)
+            use_three_channel (bool): If False, modify conv1 for 1-channel input (no pretrained weights)
+                                      If True, expect 3-channel RGB input (can use pretrained weights)
         """
         super(CycloneClassifier, self).__init__()
         
-        self.use_single_channel = use_single_channel
+        self.use_three_channel = use_three_channel
         
         # Load ResNet-18 (lightweight option)
         self.resnet = models.resnet18(pretrained=pretrained)
         
-        if use_single_channel:
+        if not use_three_channel:
             # Modify first conv layer to accept 1-channel input (grayscale satellite imagery)
             # Note: This discards pretrained weights for the first layer
             self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -280,81 +277,154 @@ def get_device():
 
 # Example usage
 if __name__ == "__main__":
-    # Import your GOESDataset here
-    # from your_dataset_module import GOESDataset
+
+    import argparse
+    import os
+    from dataset import GOESDataset
+
+    parser = argparse.ArgumentParser('Tropical cyclone image classifier training')
+    parser.add_argument(
+        '--metadata-path',
+        default='/Users/dylanwhite/Documents/Projects/tropical-cv/data/training/image_data.json',
+        type=str,
+        help='path to image data and labels JSON'
+    )
+    parser.add_argument(
+        '--val-split',
+        default=0.2,
+        type=float,
+        help='validation data split'
+    )
+    parser.add_argument(
+        '--seed',
+        default=42,
+        type=int,
+        help='random seed for reproducability'
+    )
+    parser.add_argument(
+        '--batch-size',
+        default=32,
+        type=int,
+        help='batch size used for dataloader in training'
+    )
+    parser.add_argument(
+        '--num-epochs',
+        default=50,
+        type=int,
+        help='number of epochs to train the classifier'
+    )
+    parser.add_argument(
+        '--learning-rate',
+        default=1e-3,
+        type=float,
+        help='starting learning rate to train the classifier'
+    )
+    parser.add_argument(
+        '--patch-size',
+        default=512,
+        type=int,
+        help='size of each image tile used for training'
+    )
+    parser.add_argument(
+        '--num-workers',
+        default=2,
+        type=int,
+        help='number of workers for the dataloader'
+    )
+    parser.add_argument(
+        '--weights-dir',
+        default='/Users/dylanwhite/Documents/Projects/tropical-cv/weights/resnet_classifier',
+        type=str,
+        help='directory to save output weights'
+    )
+    parser.add_argument(
+        '--use-three-channel',
+        action='store_true',
+        help='flag to convert grayscale to RGB and use pretrained imagenet weights'
+    )
+    parser.add_argument(
+        '--tensorboard-dir',
+        default='/Users/dylanwhite/Documents/Projects/tropical-cv/runs/',
+        type=str,
+        help='directory for saving tensorboard summary'
+    )
+    args = parser.parse_args()
     
-    # Configuration
-    METADATA_PATH = '/Users/dylanwhite/Documents/Projects/tropical-cv/data/training/image_data.json'
-    VAL_SPLIT = 0.2  # 20% for validation
-    SEED = 42  # For reproducibility
-    BATCH_SIZE = 16  # Adjust based on your Mac's memory
-    NUM_EPOCHS = 20
-    LEARNING_RATE = 1e-3
-    PATCH_SIZE = 512
-    NUM_WORKERS = 2  # For DataLoader
-    
+    # Make output weights directory if it doesn't exist
+    os.makedirs(args.weights_dir,exist_ok=True)
+
     # Setup device
     device = get_device()
     print(f"Using device: {device}")
     
     # Create full dataset
     full_dataset = GOESDataset(
-        image_metadata_path=METADATA_PATH,
-        patch_size=PATCH_SIZE,
+        image_metadata_path=args.metadata_path,
+        patch_size=args.patch_size,
         augment=True,
         center_bias=0.6,
-        three_channel=True
+        three_channel=args.use_three_channel
     )
     
     # Split into train and validation
     train_dataset, val_dataset = split_dataset(
         full_dataset,
-        val_split=VAL_SPLIT,
-        seed=SEED
+        val_split=args.val_split,
+        seed=args.seed
     )
     
-    # Note: For validation, we want to disable augmentation
+    # TODO: For validation, we want to disable augmentation
     # Since we're using Subset, we need to handle this differently
-    # The augmentation will still be applied, but you could modify GOESDataset
+    # The augmentation will still be applied, but I could modify GOESDataset
     # to accept an index list and handle augmentation per-sample if needed
     
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=NUM_WORKERS,
+        num_workers=args.num_workers,
         pin_memory=False
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=NUM_WORKERS,
+        num_workers=args.num_workers,
         pin_memory=False
     )
     
     # Create model
-    # Option 1: RGB with pretrained weights (RECOMMENDED for limited data)
-    model = CycloneClassifier(num_classes=2, pretrained=True, use_single_channel=False)
-    
-    # Option 2: Single channel, no pretrained weights
-    # model = CycloneClassifier(num_classes=2, pretrained=False, use_single_channel=True)
+    model = CycloneClassifier(
+        num_classes=2, 
+        pretrained=args.use_three_channel, 
+        use_three_channel=args.use_three_channel
+    )
     
     # Create trainer
+    if args.use_three_channel:
+        weights_file = 'training_log_rgb.csv'
+    else:
+        weights_file = 'training_log_grayscale.csv'
+    log_path = os.path.join(args.weights_dir,weights_file)
     trainer = CycloneTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
-        learning_rate=LEARNING_RATE,
-        log_file='training_log.csv'
+        learning_rate=args.learning_rate,
+        log_file=log_path,
+        tensorboard_dir=args.tensorboard_dir
     )
     
     # Train
-    history = trainer.train(num_epochs=NUM_EPOCHS, save_path='cyclone_classifier.pth')
+    if args.use_three_channel:
+        weights_file = 'cyclone_classifier_rgb.pth'
+    else:
+        weights_file = 'cyclone_classifier_grayscale.pth'
+    weights_path = os.path.join(args.weights_dir,weights_file)
+    history = trainer.train(num_epochs=args.num_epochs, save_path=weights_path)
     
-    print("\nTraining history saved to 'training_history.json'")
-    print("Training log saved to 'training_log.csv'")
-    print("Best model saved to 'cyclone_classifier.pth'")
+    print(f"\nTraining log saved to '{log_path}'")
+    print(f"Best model saved to '{weights_path}'")
