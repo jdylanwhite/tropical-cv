@@ -18,6 +18,7 @@ dependencies = [
     "s3fs>=0.4.2",
     "satpy>=0.59.0",
     "scikit-learn>=1.7.2",
+    "tensorboard>=2.20.0",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
     "tqdm>=4.67.1",
