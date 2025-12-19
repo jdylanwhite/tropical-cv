@@ -1,6 +1,4 @@
 '''Download GOES imagery to be used by the dataloader.'''
-# TODO make sure files don't already exist before downloading data
-# TODO save JSON of storm indices, lat/lons, TS cats, original image name, full tile coords
 
 # Import modules
 import datetime
@@ -167,7 +165,6 @@ def download_data(
          
                 # Save as netCDF
                 rad_tile = get_dataset_slice(ds.Rad,x_ind,y_ind,buffer_size)
-                #rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
                 rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
 
                 # Append to COCO-style data dictionary
@@ -208,7 +205,6 @@ def download_data(
          
                     # Save as netCDF
                     rad_tile = get_dataset_slice(ds.Rad,x_ind,y_ind,buffer_size)
-                    #rad_tile = ds.Rad[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size]
                     rad_tile.to_netcdf(file_path, encoding={'y': {'dtype': 'float32'}, 'x': {'dtype': 'float32'}})
 
                     # Append to COCO-style data dictionary
@@ -228,7 +224,6 @@ def download_data(
                     image_id += 1
 
                     # Also mark these pixels, since we have a sample already taken from them
-                    #free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] = 0
                     free = remove_free_pixels(free,x_ind,y_ind,buffer_size)
 
                     # Advance the count of negative training sample images obtained
