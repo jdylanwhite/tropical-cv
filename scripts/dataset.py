@@ -243,7 +243,7 @@ if __name__=='__main__':
 
     # Set arguments for the data loaders
     # The path to the JSON file for downloaded image metadata
-    image_metadata_path = '/Users/dylanwhite/Documents/Projects/tropical-cv/data/training/image_data.json'
+    image_metadata_path = '/Users/dylanwhite/Projects/tropical-cv/data/training/image_data.json'
     # The patch size to subset from the downloaded netCDF files
     patch_size = 512
     # The batch size
