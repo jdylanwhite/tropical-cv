@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms.functional as TF
 import numpy as np
 import random
+import copy
 
 def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512, 
                        num_workers=4, center_bias=0.0):
@@ -62,7 +63,7 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
 class GOESDataset(Dataset):
     """PyTorch Dataset for GOES satellite NetCDF imagery."""
     
-    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5, three_channel=False):
+    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5, three_channel=False, drop_missing=True, label_key='category'):
         """
         Args:
             image_metadata_path (str): JSON image metadata file pointing to image paths 
@@ -70,15 +71,22 @@ class GOESDataset(Dataset):
             augment (True): Whether to apply augmentations
             center_bias (float): Controls crop location bias toward center (0.0=uniform, 1.0=center only)
             three_channel (bool): Convert grayscale imagery to 3 channel RGB
+            drop_missing (bool): Drop IBTrACS observations missing windspeed
+            label_key (str): The column from image_metadata_path to use as the label in a batch
         """
         self.image_metadata_path = image_metadata_path
         self.patch_size = patch_size
         self.augment = augment
         self.center_bias = center_bias
         self.three_channel = three_channel
+        self.drop_missing = drop_missing
+        self.label_key = label_key
 
         # Load the image metadata
         self.image_metadata = self._load_image_metadata()
+
+        if self.drop_missing:
+            self.image_metadata = self._drop_missing_observations(self.image_metadata)
 
     def _load_image_metadata(self):
         """Load the JSON metadata file for processed GOES imagery tiles."""
@@ -104,6 +112,14 @@ class GOESDataset(Dataset):
         image_metadata['images'] = valid_images
         assert len(image_metadata['images']) > 0, "There are no valid images in the image metadata file."
         return image_metadata
+
+    def _drop_missing_observations(self,image_metadata):
+        tmp = copy.deepcopy(image_metadata)
+        tmp['images'] = []
+        for img_info in image_metadata['images']:
+            if not ((img_info['category'] == 'positive') and (img_info['wind_speed']==-9999)):
+                tmp['images'].append(img_info)
+        return tmp
 
     def _load_netcdf(self,filepath,invert=False):
         """Load data from NetCDF file."""
@@ -206,7 +222,7 @@ class GOESDataset(Dataset):
         """Load and process a single sample."""
         image_info = self.image_metadata['images'][idx]
         filepath = image_info['file_name']
-        category = image_info['category']
+        label = image_info[self.label_key]
         
         # Load NetCDF data
         img = self._load_netcdf(filepath)
@@ -232,7 +248,7 @@ class GOESDataset(Dataset):
             if patch.shape[0] == 1:
                 patch = patch.repeat(3, 1, 1)
         
-        return {'patch':patch,'category':category,'metadata':image_info}
+        return {'patch':patch,'label':str(label)}
     
 if __name__=='__main__':
 

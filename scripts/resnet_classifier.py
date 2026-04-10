@@ -22,9 +22,12 @@ class CycloneClassifier(nn.Module):
         super(CycloneClassifier, self).__init__()
         
         self.use_three_channel = use_three_channel
-        
+
         # Load ResNet-18 (lightweight option)
-        self.resnet = models.resnet18(pretrained=pretrained)
+        if pretrained:
+            self.resnet = models.resnet18(weights='DEFAULT')
+        else:
+            self.resnet = models.resnet18()
         
         if not use_three_channel:
             # Modify first conv layer to accept 1-channel input (grayscale satellite imagery)
@@ -42,7 +45,7 @@ class CycloneClassifier(nn.Module):
         return self.resnet(x)
 
 
-class CycloneTrainer:
+class IsCycloneTrainer:
     """Training pipeline for cyclone classifier."""
     
     def __init__(self, model, train_loader, val_loader, device, learning_rate=1e-3, log_file='training_log.csv', tensorboard_dir='runs'):
@@ -408,7 +411,7 @@ if __name__ == "__main__":
     else:
         weights_file = 'training_log_grayscale.csv'
     log_path = os.path.join(args.weights_dir,weights_file)
-    trainer = CycloneTrainer(
+    trainer = IsCycloneTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
