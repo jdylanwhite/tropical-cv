@@ -63,13 +63,22 @@ def download_data(
     band=13,
     start_date=None,
     end_date=None,
-    sample_size=1200,
-    limit=None
+    tile_size=1200,
+    category_samples=100,
+    subset_nature=None,
 ):
 
     # Set up a dictionary for tracking downloaded tiles
     # We may have already ran this script, 
     # so check if it exists before starting from scratch
+    if not os.path.exists(args.training_data_dir):
+        os.makedirs(args.training_data_dir,exist_ok=True)
+    positive_dir = os.path.join(args.training_data_dir,'positive')
+    if not os.path.exists(positive_dir):
+        os.makedirs(positive_dir,exist_ok=True)
+    negative_dir = os.path.join(args.training_data_dir,'negative')
+    if not os.path.exists(negative_dir):
+        os.makedirs(negative_dir,exist_ok=True) 
     output_path = os.path.join(args.training_data_dir,'image_data.json')
     if os.path.exists(output_path):
         with open(output_path,'r') as f:
@@ -87,27 +96,33 @@ def download_data(
     # Read the IBTrACS data that we've already filtered 
     # for intersection on the GOES disk 
     df = ibtracs.read_data(ibtracs_path)
-    df = df.loc[df['NATURE']=='TS'].reset_index()
+    if subset_nature is not None:
+        df2 = df.loc[df['NATURE']==subset_nature].copy(deep=True).reset_index()
+    else:
+        df2 = df.copy(deep=True)
     
     # Filter the dates of the IBTrACS for what we wish to download
     if start_date is not None:
         start_date = datetime.datetime.fromisoformat(start_date)
-        df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'],utc=True)
-        df = df.loc[(df['ISO_TIME'] >= start_date)].copy(deep=True)
+        df2['ISO_TIME'] = pd.to_datetime(df2['ISO_TIME'],utc=True)
+        df2 = df2.loc[(df2['ISO_TIME'] >= start_date)].copy(deep=True)
     if end_date is not None:
         end_date = datetime.datetime.fromisoformat(end_date)
-        df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'],utc=True)
-        df = df.loc[(df['ISO_TIME'] <= end_date)].copy(deep=True)
+        df2['ISO_TIME'] = pd.to_datetime(df2['ISO_TIME'],utc=True)
+        df2 = df2.loc[(df2['ISO_TIME'] <= end_date)].copy(deep=True)
 
-    # Limit the data to a random sample, if applicable
-    if limit is not None and len(df)>limit:
-        df = df.sample(limit)
+    # Sample rows per category on the Saffir-Simpson hurricane scale
+    if category_samples is not None:
+        df2 = df2.groupby('USA_SSHS', group_keys=False).apply(
+            lambda x: x.sample(min(len(x), category_samples), random_state=42),
+            include_groups=False
+        ).copy(deep=True)
     
     # Set the buffer (in pixels) size
-    buffer_size = sample_size // 2
+    buffer_size = tile_size // 2
     
-    # Loop through all of the dates in the IBTrACS dataframe
-    dates = df['ISO_TIME'].unique()
+    # Loop through all of the dates in the sampled IBTrACS dataframe
+    dates = df2['ISO_TIME'].unique()
     for date in tqdm(dates,total=len(dates),desc="Downloading GOES Imagery"):
 
         # Convert the numpy.datetime64 object into a datetime object
@@ -160,7 +175,7 @@ def download_data(
                 y_ind = np.nanargmin(abs(y-track_y))
          
                 # Set the file name
-                file_name = dt.strftime("%Y%m%d_%HZ")+f'_x{x_ind:05.0f}_y{y_ind:05.0f}_hw{sample_size}.nc'
+                file_name = dt.strftime("%Y%m%d_%HZ")+f'_x{x_ind:05.0f}_y{y_ind:05.0f}_hw{tile_size}.nc'
                 file_path = os.path.join(training_data_dir,'positive',file_name)
          
                 # Save as netCDF
@@ -179,7 +194,9 @@ def download_data(
                     'original_ul':[int(y_ind-buffer_size),int(x_ind-buffer_size)],
                     'track_coordinates':[float(track_lon),float(track_lat)],
                     'date':str(date),
-                    'df_index':i
+                    'ibtracs_df_index':i,
+                    'nature':row['NATURE'],
+                    'sshs':row['USA_SSHS']
                 })
                 image_id += 1
          
@@ -200,7 +217,7 @@ def download_data(
                 if (free[y_ind-buffer_size:y_ind+buffer_size,x_ind-buffer_size:x_ind+buffer_size] == 1).all():
          
                     # Set the file name
-                    file_name = dt.strftime("%Y%m%d_%HZ")+f'_x{x_ind:05.0f}_y{y_ind:05.0f}_hw{sample_size}.nc'
+                    file_name = dt.strftime("%Y%m%d_%HZ")+f'_x{x_ind:05.0f}_y{y_ind:05.0f}_hw{tile_size}.nc'
                     file_path = os.path.join(training_data_dir,'negative',file_name)
          
                     # Save as netCDF
@@ -219,7 +236,9 @@ def download_data(
                         'original_ul':[int(y_ind-buffer_size),int(x_ind-buffer_size)],
                         'track_coordinates':[-9999,-9999],
                         'date':str(date),
-                        'df_index':-9999
+                        'ibtracs_df_index':-9999,
+                        'nature':-9999,
+                        'sshs':-9999
                     })
                     image_id += 1
 
@@ -252,7 +271,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GOES Tile Downloader')
     parser.add_argument(
         '--ibtracs_path',
-        default="/Users/dylanwhite/Documents/Projects/tropical-cv/data/ibtracs/ibtracs_goes_east.csv",
+        default="/Users/dylanwhite/Projects/tropical-cv/data/ibtracs/ibtracs_goes_east.csv",
         type=str
     )
     parser.add_argument(
@@ -266,12 +285,12 @@ if __name__ == '__main__':
         type=str
     )
     parser.add_argument(
-        '--limit',
+        '--category_samples',
         default=None,
         type=int
     )
     parser.add_argument(
-        '--sample_size',
+        '--tile_size',
         default=1200,
         type=int
     )
@@ -282,7 +301,12 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--training_data_dir',
-        default="/Users/dylanwhite/Documents/Projects/tropical-cv/data/training",
+        default="/Users/dylanwhite/Projects/tropical-cv/data/training",
+        type=str
+    )
+    parser.add_argument(
+        '--subset_nature',
+        default=None,
         type=str
     )
     args = parser.parse_args()
@@ -293,6 +317,7 @@ if __name__ == '__main__':
         band=args.band,
         start_date=args.start_date,
         end_date=args.end_date,
-        sample_size=args.sample_size,
-        limit=args.limit
+        tile_size=args.tile_size,
+        category_samples=args.category_samples,
+        subset_nature=args.subset_nature
     )
