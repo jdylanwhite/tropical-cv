@@ -1,14 +1,21 @@
 import json
 import xarray as xr
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler, Subset
 import torchvision.transforms.functional as TF
 import numpy as np
 import random
 import copy
+from PIL import Image, ImageDraw, ImageFont
+import matplotlib.pyplot as plt
+import math
+from collections import Counter
 
 def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512, 
-                       num_workers=4, center_bias=0.0):
+                       num_workers=4, center_bias=0.0, three_channel=False, 
+                       drop_classes=[-5,-4,-3,-2], label_key='category', 
+                       evenly_sample=True
+    ):
     """
     Create train and test dataloaders.
     
@@ -19,7 +26,11 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
         patch_size: Size of image patches
         num_workers: Number of workers for data loading
         center_bias: Controls crop location bias toward center (0.0=uniform, 1.0=center only)
-    
+        three_channel (bool): Convert grayscale imagery to 3 channel RGB
+        drop_classes (list): Drop IBTrACS observations with cerain class IDs
+        label_key (str): The column from image_metadata_path to use as the label in a batch
+        evenly_sample (bool): Sample across classes evenly rather than from original distribution
+
     Returns:
         train_loader, test_loader
     """
@@ -29,7 +40,10 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
         data_dir, 
         patch_size=patch_size, 
         augment=True, 
-        center_bias=center_bias
+        center_bias=center_bias,
+        three_channel=three_channel,
+        drop_classes=drop_classes, 
+        label_key=label_key
     )
     
     # Calculate split sizes
@@ -42,13 +56,22 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
         generator=torch.Generator().manual_seed(42)
     )
     
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-    )
+    if evenly_sample:
+        train_sampler = create_balanced_sampler(train_dataset,label_key=label_key)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+        )
+    # Create test dataloader
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -60,10 +83,167 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
     
     return train_loader, test_loader
 
+def save_batch_mosaic(batch):
+    
+    """
+    Save a batch to a mosiac
+
+    Args:
+        batch
+    """
+
+    # Calculate mosaic dimensions
+    padding = 3
+    mosaic_width = 4
+    mosaic_height = math.ceil(batch_size / mosaic_width)
+    mosaic_img_width = mosaic_width * patch_size + (mosaic_width + 1) * padding
+    mosaic_img_height = mosaic_height * patch_size + (mosaic_height + 1) * padding
+
+    # Create empty mosaic array (white background)
+    mosaic = np.ones((mosaic_img_height, mosaic_img_width), dtype=np.uint8) * 0
+
+    # Randomly crop the tile
+    for i in range(mosaic_width):
+        for j in range(mosaic_height):
+
+            # Iterate through the dataset
+            batch_ind = i*mosaic_height + j 
+            patch = batch['patch'][batch_ind]
+            category = batch['label'][batch_ind]
+
+            # Calculate position in mosaic
+            y_start = padding + j * (patch_size + padding)
+            x_start = padding + i * (patch_size + padding)
+            
+            # Place tile in mosaic
+            mosaic[y_start:y_start + patch_size, x_start:x_start + patch_size] = patch*255
+
+    # Convert to PIL Image (move this outside the loop)
+    mosaic_img = Image.fromarray(mosaic)
+
+    # Add text labels
+    draw = ImageDraw.Draw(mosaic_img)
+
+    # Try to load a font (fallback to default if not available)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 30)
+    except:
+        font = ImageFont.load_default(size=30)
+
+    # Add text to each patch
+    for i in range(mosaic_width):
+        for j in range(mosaic_height):
+            batch_ind = i*mosaic_height + j
+            category = batch['label'][batch_ind]
+            
+            # Calculate position for text (top-left corner of each patch)
+            x_start = padding + i * (patch_size + padding) + 5
+            y_start = padding + j * (patch_size + padding) + 5
+            
+            # Draw text with outline for better visibility
+            # Draw black outline
+            for offset_x in [-1, 0, 1]:
+                for offset_y in [-1, 0, 1]:
+                    draw.text((x_start + offset_x, y_start + offset_y), category, fill=0, font=font)
+            # Draw white text on top
+            draw.text((x_start, y_start), category, fill=255, font=font)
+
+    mosaic_img.save('./training_sample.png')
+
+    return mosaic_img
+
+def create_balanced_sampler(dataset, label_key='category', negative_class_ratio=0.5):
+    """
+    Create a WeightedRandomSampler to balance classes during training.
+    Automatically extracts label_map from the dataset.
+    
+    Args:
+        dataset: PyTorch Dataset or Subset
+        negative_class_ratio: Proportion of samples that should be from the negative class ("-9999")
+                              Default 0.5 means 50% negative, 50% positive (split among other classes)
+    
+    Returns:
+        WeightedRandomSampler
+    """
+    # Get the base dataset and extract label_map
+    if isinstance(dataset, Subset):
+        base_dataset = dataset.dataset
+        indices = dataset.indices
+    else:
+        base_dataset = dataset
+        indices = list(range(len(dataset)))
+    
+    # Get all unique categories from the dataset
+    all_categories = set()
+    for idx in range(len(base_dataset)): # type: ignore
+        category_str = base_dataset.image_metadata['images'][idx][label_key] # type: ignore
+        all_categories.add(category_str)
+    
+    # Create label map (sorted for consistency)
+    sorted_categories = sorted(all_categories)
+    label_map = {cat: idx for idx, cat in enumerate(sorted_categories)}
+    
+    # Find the negative class index
+    negative_class_idx = label_map.get(-9999, None)
+    if negative_class_idx is None:
+        negative_class_ratio = None
+    
+    # Get all labels from the dataset
+    labels = []
+    for idx in indices:
+        category_str = base_dataset.image_metadata['images'][idx][label_key] # type: ignore
+        labels.append(label_map[category_str])
+    
+    # Count samples per class
+    class_counts = Counter(labels)
+
+    # Calculate weight for each class
+    num_classes = len(class_counts)
+    class_weights = {}
+    
+    if negative_class_ratio is not None:
+        # Custom weighting: negative_class_ratio for "-9999", rest split among other classes
+        num_positive_classes = num_classes - 1  # All classes except "-9999"
+        positive_class_ratio = (1.0 - negative_class_ratio) / num_positive_classes
+        
+        for class_idx in range(num_classes):
+            if class_idx not in class_counts:
+                class_weights[class_idx] = 0.0
+                continue
+                
+            if class_idx == negative_class_idx:
+                # Weight for negative class
+                # target_ratio / actual_ratio gives us the weight
+                actual_ratio = class_counts[class_idx] / len(labels)
+                class_weights[class_idx] = negative_class_ratio / actual_ratio
+            else:
+                # Weight for positive classes
+                actual_ratio = class_counts[class_idx] / len(labels)
+                class_weights[class_idx] = positive_class_ratio / actual_ratio
+    else:
+        # Standard balanced sampling (all classes equal)
+        for class_idx in range(num_classes):
+            if class_idx in class_counts:
+                class_weights[class_idx] = len(labels) / (num_classes * class_counts[class_idx])
+            else:
+                class_weights[class_idx] = 0.0
+    
+    # Assign weight to each sample based on its class
+    sample_weights = [class_weights[label] for label in labels]
+    
+    # Create sampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    
+    return sampler
+
 class GOESDataset(Dataset):
     """PyTorch Dataset for GOES satellite NetCDF imagery."""
     
-    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5, three_channel=False, drop_missing=True, label_key='category'):
+    def __init__(self, image_metadata_path, patch_size=512, augment=True, center_bias=0.5, three_channel=False, drop_classes=[-5,-4,-3,-2], label_key='category'):
         """
         Args:
             image_metadata_path (str): JSON image metadata file pointing to image paths 
@@ -71,22 +251,39 @@ class GOESDataset(Dataset):
             augment (True): Whether to apply augmentations
             center_bias (float): Controls crop location bias toward center (0.0=uniform, 1.0=center only)
             three_channel (bool): Convert grayscale imagery to 3 channel RGB
-            drop_missing (bool): Drop IBTrACS observations missing windspeed
+            drop_classes (list): Drop IBTrACS observations with cerain class IDs
             label_key (str): The column from image_metadata_path to use as the label in a batch
+
+        Tropical storm category IDs from IBTrACS:
+            -5 = Unknown [XX]
+            -4 = Post-tropical [EX, ET, PT]
+            -3 = Miscellaneous disturbances [WV, LO, DB, DS, IN, MD]
+            -2 = Subtropical [SS, SD]
+            Tropical systems classified based on wind speeds [TD, TS, HU, TY,, TC, ST, HR]
+            -1 = Tropical depression (W<34)
+            0 = Tropical storm [34<W<64]
+            1 = Category 1 [64<=W<83]
+            2 = Category 2 [83<=W<96]
+            3 = Category 3 [96<=W<113]
+            4 = Category 4 [113<=W<137]
+            26 USA_SSHS (same)
+            5 = Category 5 [W >= 137]
+
         """
         self.image_metadata_path = image_metadata_path
         self.patch_size = patch_size
         self.augment = augment
         self.center_bias = center_bias
         self.three_channel = three_channel
-        self.drop_missing = drop_missing
+        self.drop_classes = drop_classes
         self.label_key = label_key
 
         # Load the image metadata
         self.image_metadata = self._load_image_metadata()
 
-        if self.drop_missing:
-            self.image_metadata = self._drop_missing_observations(self.image_metadata)
+        # Drop classes from positive samples if specified
+        if self.drop_classes:
+            self._drop_classes()
 
     def _load_image_metadata(self):
         """Load the JSON metadata file for processed GOES imagery tiles."""
@@ -113,13 +310,16 @@ class GOESDataset(Dataset):
         assert len(image_metadata['images']) > 0, "There are no valid images in the image metadata file."
         return image_metadata
 
-    def _drop_missing_observations(self,image_metadata):
-        tmp = copy.deepcopy(image_metadata)
-        tmp['images'] = []
-        for img_info in image_metadata['images']:
-            if not ((img_info['category'] == 'positive') and (img_info['wind_speed']==-9999)):
-                tmp['images'].append(img_info)
-        return tmp
+    def _drop_classes(self):
+        if self.image_metadata is None:
+            raise ValueError('image_metadata has not been loaded')
+        if self.drop_classes is not None:
+            tmp = copy.deepcopy(self.image_metadata)
+            tmp['images'] = []
+            for img_info in self.image_metadata['images']:
+                if (img_info['sshs'] not in self.drop_classes):
+                    tmp['images'].append(img_info)
+            self.image_metadata = tmp
 
     def _load_netcdf(self,filepath,invert=False):
         """Load data from NetCDF file."""
@@ -130,7 +330,8 @@ class GOESDataset(Dataset):
         data.close()
 
         # Normalize to 0-255
-        rad_normalized = (rad_data - rad_data.min()) / (rad_data.max() - rad_data.min())
+        rad_normalized = (rad_data - np.nanmin(rad_data)) / (np.nanmax(rad_data) - np.nanmin(rad_data))
+        rad_normalized = np.where(rad_normalized==np.nan,0.0,rad_normalized)
         rad_uint8 = (rad_normalized * 255).astype(np.uint8)
 
         if invert:
@@ -216,10 +417,14 @@ class GOESDataset(Dataset):
 
     def __len__(self):
         """Return the number of samples in the dataset."""
+        if self.image_metadata is None:
+            raise ValueError('image_metadata has not been loaded')
         return len(self.image_metadata['images'])
 
     def __getitem__(self, idx):
         """Load and process a single sample."""
+        if self.image_metadata is None:
+            raise ValueError('image_metadata has not been loaded')
         image_info = self.image_metadata['images'][idx]
         filepath = image_info['file_name']
         label = image_info[self.label_key]
@@ -250,12 +455,8 @@ class GOESDataset(Dataset):
         
         return {'patch':patch,'label':str(label)}
     
-if __name__=='__main__':
 
-    # Imports
-    from PIL import Image, ImageDraw, ImageFont
-    import matplotlib.pyplot as plt
-    import math
+if __name__=='__main__':
 
     # Set arguments for the data loaders
     # The path to the JSON file for downloaded image metadata
@@ -266,6 +467,12 @@ if __name__=='__main__':
     batch_size = 16
     # How biased to be towards the center of a tile for positive tiles
     center_bias = 0.6
+    # Convert to RGB or leave as greyscale
+    three_channel=False
+    # Drop Saffir-Simpson classes from IBTrACS observations
+    drop_classes=[-5,-4,-3,-2]
+    # The label for classes drawn
+    label_key='sshs'
 
     # Create a train/test split
     train_loader, test_loader = create_dataloaders(
@@ -274,7 +481,11 @@ if __name__=='__main__':
         train_split=0.8, 
         patch_size=patch_size, 
         num_workers=0, 
-        center_bias=center_bias
+        center_bias=center_bias,
+        label_key=label_key,
+        three_channel=three_channel,
+        drop_classes=drop_classes,
+        evenly_sample=True
     )
 
     # Get iterator
@@ -283,61 +494,7 @@ if __name__=='__main__':
     # Get a batch from the loader
     batch = next(data_iter)
 
-    # Calculate mosaic dimensions
-    padding = 3
-    mosaic_width = 4
-    mosaic_height = math.ceil(batch_size / mosaic_width)
-    mosaic_img_width = mosaic_width * patch_size + (mosaic_width + 1) * padding
-    mosaic_img_height = mosaic_height * patch_size + (mosaic_height + 1) * padding
-
-    # Create empty mosaic array (white background)
-    mosaic = np.ones((mosaic_img_height, mosaic_img_width), dtype=np.uint8) * 0
-
-    # Randomly crop the tile
-    for i in range(mosaic_width):
-        for j in range(mosaic_height):
-
-            # Iterate through the dataset
-            batch_ind = i*mosaic_height + j 
-            patch = batch['patch'][batch_ind]
-            category = batch['category'][batch_ind]
-
-            # Calculate position in mosaic
-            y_start = padding + j * (patch_size + padding)
-            x_start = padding + i * (patch_size + padding)
-            
-            # Place tile in mosaic
-            mosaic[y_start:y_start + patch_size, x_start:x_start + patch_size] = patch*255
-
-    # Convert to PIL Image (move this outside the loop)
-    mosaic_img = Image.fromarray(mosaic)
-
-    # Add text labels
-    draw = ImageDraw.Draw(mosaic_img)
-
-    # Try to load a font (fallback to default if not available)
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 30)
-    except:
-        font = ImageFont.load_default(size=30)
-
-    # Add text to each patch
-    for i in range(mosaic_width):
-        for j in range(mosaic_height):
-            batch_ind = i*mosaic_height + j
-            category = batch['category'][batch_ind]
-            
-            # Calculate position for text (top-left corner of each patch)
-            x_start = padding + i * (patch_size + padding) + 5
-            y_start = padding + j * (patch_size + padding) + 5
-            
-            # Draw text with outline for better visibility
-            # Draw black outline
-            for offset_x in [-1, 0, 1]:
-                for offset_y in [-1, 0, 1]:
-                    draw.text((x_start + offset_x, y_start + offset_y), category, fill=0, font=font)
-            # Draw white text on top
-            draw.text((x_start, y_start), category, fill=255, font=font)
+    mosaic_img = save_batch_mosaic(batch)
 
     plt.imshow(mosaic_img,cmap="Greys")
     plt.axis('off')

@@ -115,8 +115,8 @@ def download_data(
     if category_samples is not None:
         df2 = df2.groupby('USA_SSHS', group_keys=False).apply(
             lambda x: x.sample(min(len(x), category_samples), random_state=42),
-            include_groups=False
-        ).copy(deep=True)
+            include_groups=False # type: ignore
+        ).copy(deep=True) # type: ignore
     
     # Set the buffer (in pixels) size
     buffer_size = tile_size // 2
