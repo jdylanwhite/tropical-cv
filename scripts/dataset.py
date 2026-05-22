@@ -83,7 +83,7 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
     
     return train_loader, test_loader
 
-def save_batch_mosaic(batch):
+def save_batch_mosaic(batch,filepath='./training_sample.png'):
     
     """
     Save a batch to a mosiac
@@ -91,6 +91,10 @@ def save_batch_mosaic(batch):
     Args:
         batch
     """
+
+    batch_size = len(batch['label'])
+    patch_size = batch['patch'][0].shape[-1]
+    ndims = len(batch['patch'][0].shape) 
 
     # Calculate mosaic dimensions
     padding = 3
@@ -100,7 +104,10 @@ def save_batch_mosaic(batch):
     mosaic_img_height = mosaic_height * patch_size + (mosaic_height + 1) * padding
 
     # Create empty mosaic array (white background)
-    mosaic = np.ones((mosaic_img_height, mosaic_img_width), dtype=np.uint8) * 0
+    if ndims == 2:
+        mosaic = np.ones((mosaic_img_height, mosaic_img_width), dtype=np.uint8) * 0
+    else:
+        mosaic = np.ones((3, mosaic_img_height, mosaic_img_width), dtype=np.uint8) * 0
 
     # Randomly crop the tile
     for i in range(mosaic_width):
@@ -116,10 +123,13 @@ def save_batch_mosaic(batch):
             x_start = padding + i * (patch_size + padding)
             
             # Place tile in mosaic
-            mosaic[y_start:y_start + patch_size, x_start:x_start + patch_size] = patch*255
+            mosaic[..., y_start:y_start + patch_size, x_start:x_start + patch_size] = patch*255
 
-    # Convert to PIL Image (move this outside the loop)
-    mosaic_img = Image.fromarray(mosaic)
+    # Convert to PIL Image
+    if ndims==3:
+        mosaic_img = Image.fromarray(mosaic.transpose(1, 2, 0))
+    else:
+        mosaic_img = Image.fromarray(mosaic)
 
     # Add text labels
     draw = ImageDraw.Draw(mosaic_img)
@@ -148,7 +158,7 @@ def save_batch_mosaic(batch):
             # Draw white text on top
             draw.text((x_start, y_start), category, fill=255, font=font)
 
-    mosaic_img.save('./training_sample.png')
+    mosaic_img.save(filepath)
 
     return mosaic_img
 
