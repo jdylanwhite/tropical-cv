@@ -32,11 +32,11 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
         evenly_sample (bool): Sample across classes evenly rather than from original distribution
 
     Returns:
-        train_loader, test_loader
+        train_loader, val_loader
     """
 
     # Create dataset
-    dataset = GOESDataset(
+    full_dataset = GOESDataset(
         data_dir, 
         patch_size=patch_size, 
         augment=True, 
@@ -46,15 +46,34 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
         label_key=label_key
     )
     
-    # Calculate split sizes
-    train_size = int(train_split * len(dataset))
-    test_size = len(dataset) - train_size
-    
-    # Split dataset
-    train_dataset, test_dataset = random_split(
-        dataset, [train_size, test_size],
-        generator=torch.Generator().manual_seed(42)
+    # Load full metadata to get indices first
+    n = len(full_dataset)
+    indices = list(range(n))
+    random.Random(42).shuffle(indices)
+    split = int(train_split * n)
+    train_indices, val_indices = indices[:split], indices[split:]
+
+    # Two separate instances — different augment settings, same underlying files
+    train_dataset = GOESDataset(
+        data_dir, 
+        patch_size=patch_size, 
+        augment=True, 
+        center_bias=center_bias,
+        three_channel=three_channel,
+        drop_classes=drop_classes, 
+        label_key=label_key
     )
+    val_dataset   = GOESDataset(
+        data_dir, 
+        patch_size=patch_size, 
+        augment=False, 
+        center_bias=center_bias,
+        three_channel=three_channel,
+        drop_classes=drop_classes, 
+        label_key=label_key
+    )
+    train_dataset = Subset(train_dataset, train_indices)
+    val_dataset   = Subset(val_dataset,   val_indices)
     
     if evenly_sample:
         train_sampler = create_balanced_sampler(train_dataset,label_key=label_key)
@@ -72,16 +91,16 @@ def create_dataloaders(data_dir, batch_size=8, train_split=0.8, patch_size=512,
             num_workers=num_workers,
         )
     # Create test dataloader
-    test_loader = DataLoader(
-        test_dataset,
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
     )
     
-    print(f"Train samples: {train_size}, Test samples: {test_size}")
+    print(f"Train samples: {len(train_dataset)}, Test samples: {len(val_dataset)}")
     
-    return train_loader, test_loader
+    return train_loader, val_loader
 
 def save_batch_mosaic(batch,filepath='./training_sample.png'):
     
@@ -351,14 +370,23 @@ class GOESDataset(Dataset):
 
     def _random_crop(self, arr):
         """Extract random patch from image, with optional center bias."""
-        h, w = arr.shape[-2:]
-        
+        # h, w = arr.shape[-2:]
+        if arr.ndim == 3:
+            _, h, w = arr.shape
+        else:
+            h, w = arr.shape
+
+
         if h < self.patch_size or w < self.patch_size:
             # Pad if image is smaller than patch size
             pad_h = max(0, self.patch_size - h)
             pad_w = max(0, self.patch_size - w)
             arr = np.pad(arr, ((0, pad_h), (0, pad_w)), mode='reflect')
-            h, w = arr.shape[-2:]
+            # h, w = arr.shape[-2:]
+            if arr.ndim == 3:
+                _, h, w = arr.shape
+            else:
+                h, w = arr.shape
         
         # Calculate center of image
         center_y = h // 2
@@ -420,10 +448,15 @@ class GOESDataset(Dataset):
             # Apply random scaling factor
             scale = random.uniform(0.6, 1.4)
             arr = arr * scale
-            #arr = np.clip(arr,0,255)
             arr = torch.clamp(arr, 0, 255)
         
         return arr
+    
+    def _normalize(self, t):
+        mx = t.max()
+        if mx <= 0:
+            return torch.zeros_like(t)  # explicitly handle bad patches
+        return torch.clamp(t / mx, 0, 1)
 
     def __len__(self):
         """Return the number of samples in the dataset."""
@@ -454,9 +487,10 @@ class GOESDataset(Dataset):
                 patch = patch.unsqueeze(0)
         
         # Normalize
-        # patch = (patch - patch.mean()) / (patch.std() + 1e-8)
-        patch = patch / patch.max()
-        patch = torch.clamp(patch, 0, 1)
+        # # patch = (patch - patch.mean()) / (patch.std() + 1e-8)
+        # patch = patch / patch.max()
+        # patch = torch.clamp(patch, 0, 1)
+        patch = self._normalize(patch)
 
         # Repeat to three channel RGB
         if self.three_channel:
