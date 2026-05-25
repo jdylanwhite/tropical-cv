@@ -233,7 +233,7 @@ class SAM3App(tk.Tk):
         try:
             with open(METADATA_PATH) as f:
                 image_data = json.load(f)
-            self.image_data = [x for x in image_data["images"] if x.get("sshs", 0) > 2]
+            self.image_data = [x for x in image_data["images"] if x.get("sshs", 0) >= 0]
         except Exception as e:
             messagebox.showerror("Metadata error", str(e))
             return
@@ -437,8 +437,8 @@ class SAM3App(tk.Tk):
         cursors = {
             "move":"fleur","n":"sb_v_double_arrow","s":"sb_v_double_arrow",
             "e":"sb_h_double_arrow","w":"sb_h_double_arrow",
-            "nw":"size_nw_se","se":"size_nw_se",
-            "ne":"size_ne_sw","sw":"size_ne_sw",
+            "nw":"top_left_corner","se":"bottom_right_corner",
+            "ne":"top_right_corner","sw":"bottom_left_corner",
         }
         self.canvas.config(cursor=cursors.get(mode, ""))
 
