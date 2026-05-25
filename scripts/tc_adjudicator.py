@@ -193,13 +193,28 @@ class SAM3App(tk.Tk):
                  wraplength=240).pack(side=tk.BOTTOM, pady=12)
 
     def _btn(self, parent, text, cmd, fg=TEXT_C, bg="#21262d", pad=6):
-        return tk.Button(
-            parent, text=text, command=cmd,
+        """Label-based button that actually shows colours on macOS."""
+        lbl = tk.Label(
+            parent, text=text,
             font=("Courier", 11, "bold"),
-            fg=fg, bg=bg, activeforeground=fg,
-            activebackground=bg,
+            fg=fg, bg=bg,
             relief=tk.FLAT, cursor="hand2",
             padx=pad, pady=pad
+        )
+        lbl.bind("<ButtonRelease-1>", lambda e: cmd())
+        # subtle hover darkening
+        darker = self._darken(bg)
+        lbl.bind("<Enter>", lambda e: lbl.config(bg=darker))
+        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg))
+        return lbl
+
+    @staticmethod
+    def _darken(hex_color, factor=0.75):
+        """Return a slightly darker version of a hex colour."""
+        hex_color = hex_color.lstrip("#")
+        r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return "#{:02x}{:02x}{:02x}".format(
+            int(r * factor), int(g * factor), int(b * factor)
         )
 
     # ── model init ────────────────────────────────────────────────────────────
@@ -488,11 +503,11 @@ class SAM3App(tk.Tk):
         score = float(scores_np[best])
 
         record = {
-            "file_name": self.sample["file_name"],
-            "sshs":      self.sample.get("sshs"),
+            "file_name": str(self.sample["file_name"]),
+            "sshs":      int(self.sample["sshs"]) if self.sample.get("sshs") is not None else None,
             "prompt":    prompt,
-            "score":     score,
-            "box_xyxy":  [round(v, 2) for v in native_box],
+            "score":     round(float(score), 4),
+            "box_xyxy":  [round(float(v), 2) for v in native_box],
             "status":    "accepted",
         }
         self.output_records.append(record)
@@ -506,8 +521,8 @@ class SAM3App(tk.Tk):
             return
         prompt = self.results[self.result_idx][0] if self.results else "—"
         record = {
-            "file_name": self.sample["file_name"],
-            "sshs":      self.sample.get("sshs"),
+            "file_name": str(self.sample["file_name"]),
+            "sshs":      int(self.sample["sshs"]) if self.sample.get("sshs") is not None else None,
             "prompt":    prompt,
             "status":    "denied",
         }
