@@ -91,12 +91,17 @@ class SAM3App(tk.Tk):
         p = Path(OUTPUT_PATH)
         if p.exists():
             with open(p) as f:
-                return json.load(f)
-        return []
+                records = json.load(f)
+        else:
+            records = []
+        # build set of already-adjudicated filenames for fast lookup
+        self._seen = {r["file_name"] for r in records}
+        return records
 
     def _save_output(self):
         with open(OUTPUT_PATH, "w") as f:
             json.dump(self.output_records, f, indent=2)
+        self._seen = {r["file_name"] for r in self.output_records}
 
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -233,7 +238,7 @@ class SAM3App(tk.Tk):
         try:
             with open(METADATA_PATH) as f:
                 image_data = json.load(f)
-            self.image_data = [x for x in image_data["images"] if x.get("sshs", 0) >= 0]
+            self.image_data = [x for x in image_data["images"] if x.get("sshs", -1) >= 0]
         except Exception as e:
             messagebox.showerror("Metadata error", str(e))
             return
@@ -247,7 +252,13 @@ class SAM3App(tk.Tk):
             self.status_var.set("No images loaded.")
             return
 
-        self.sample = np.random.choice(self.image_data)
+        remaining = [x for x in self.image_data if x["file_name"] not in self._seen]
+        if not remaining:
+            self.status_var.set("All tiles adjudicated!")
+            messagebox.showinfo("Done", "You've adjudicated every tile in the dataset.")
+            return
+
+        self.sample = np.random.choice(remaining)
         filepath    = self.sample["file_name"]
         invert      = True
 
@@ -546,7 +557,8 @@ class SAM3App(tk.Tk):
     def _update_stats(self):
         acc  = sum(1 for r in self.output_records if r.get("status") == "accepted")
         den  = sum(1 for r in self.output_records if r.get("status") == "denied")
-        self.stats_var.set(f"Saved: {acc}   Denied: {den}")
+        rem  = len(self.image_data) - len(self._seen)
+        self.stats_var.set(f"Saved: {acc}   Denied: {den}   Remaining: {rem}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
